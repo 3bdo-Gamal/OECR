@@ -1,0 +1,7 @@
+customtkinter
+google-cloud-vision
+python-docx
+pdf2image
+PyPDF2
+python-dotenv
+pyinstaller

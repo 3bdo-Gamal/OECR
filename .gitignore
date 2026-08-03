@@ -1,0 +1,48 @@
+# ==============================
+# OECR Project Specific
+# ==============================
+# NEVER upload your Google Cloud credentials!
+credentials.json
+.env
+
+# Ignore temporary folders where processed images and PDFs are stored
+temp_images/
+temp_uploads/
+output_files/
+poppler/
+
+# ==============================
+# PyInstaller (Executable building)
+# ==============================
+build/
+dist/
+*.spec
+
+# ==============================
+# Python Standard
+# ==============================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# ==============================
+# OS & Editor Files
+# ==============================
+# VS Code
+.vscode/
+
+# Windows / Mac system files
+Thumbs.db
+.DS_Store
+
+
+# Java JDK
+jdk/
