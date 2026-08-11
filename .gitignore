@@ -4,12 +4,14 @@
 # NEVER upload your Google Cloud credentials!
 credentials.json
 .env
+settings.json
 
 # Ignore temporary folders where processed images and PDFs are stored
 temp_images/
 temp_uploads/
 output_files/
 poppler/
+cache/
 
 # ==============================
 # PyInstaller (Executable building)

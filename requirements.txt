@@ -1,7 +1,9 @@
 customtkinter
-google-cloud-vision
+paddleocr
+opencv-python
 python-docx
 pdf2image
 PyPDF2
 python-dotenv
 pyinstaller
+tkinterdnd2
