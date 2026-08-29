@@ -1,3 +1,15 @@
+import sys
+import os
+
+# PyInstaller frozen mode: set working directory and paths
+if getattr(sys, 'frozen', False):
+    # Set working dir to exe's directory (for temp_images, cache, settings.json)
+    os.chdir(os.path.dirname(sys.executable))
+    # Point PaddleOCR to bundled models
+    bundled_models = os.path.join(sys._MEIPASS, '.paddleocr')
+    if os.path.exists(bundled_models):
+        os.environ['PADDLEOCR_HOME'] = bundled_models
+
 import customtkinter as ctk
 from tkinter import filedialog
 from pathlib import Path
@@ -6,7 +18,6 @@ from pdf2image import convert_from_path
 from PyPDF2 import PdfReader
 import hashlib
 import json
-import os
 import threading
 import shutil
 from typing import Optional
@@ -24,6 +35,7 @@ from core.ocr_engine import extract_text_from_image
 from core.text_analyzer import calculate_counts_from_raw_text
 from core.document_builder import export_text_to_docx
 from core.config import set_setting, get_setting
+from core.ai_corrector import correct_text_with_ai, is_ai_correction_available
 
 # Set the overall theme
 ctk.set_appearance_mode("System")
@@ -216,10 +228,14 @@ class DocumentProcessorApp(BaseApp):
         """Opens a small window to configure OCR settings."""
         settings_win = ctk.CTkToplevel(self)
         settings_win.title("Settings")
-        settings_win.geometry("450x350")
+        settings_win.geometry("480x750")
         settings_win.attributes("-topmost", True)
         
-        ctk.CTkLabel(settings_win, text="OECR Configuration", font=ctk.CTkFont(weight="bold", size=18)).pack(pady=15)
+        # Scrollable frame for all settings
+        scroll_frame = ctk.CTkScrollableFrame(settings_win, width=440, height=570)
+        scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        ctk.CTkLabel(scroll_frame, text="OECR Configuration", font=ctk.CTkFont(weight="bold", size=18)).pack(pady=(10, 15))
         
         # GPU Toggle
         use_gpu = get_setting("use_gpu", False)
@@ -228,8 +244,8 @@ class DocumentProcessorApp(BaseApp):
         def toggle_gpu():
             set_setting("use_gpu", gpu_var.get())
             
-        gpu_switch = ctk.CTkSwitch(settings_win, text="Enable GPU Acceleration", variable=gpu_var, command=toggle_gpu)
-        gpu_switch.pack(pady=10)
+        gpu_switch = ctk.CTkSwitch(scroll_frame, text="Enable GPU Acceleration", variable=gpu_var, command=toggle_gpu)
+        gpu_switch.pack(pady=8)
 
         # Language Selection
         lang = get_setting("ocr_lang", "ar")
@@ -239,13 +255,13 @@ class DocumentProcessorApp(BaseApp):
             lang_code = "ar" if choice == "Arabic & English (Auto)" else "en"
             set_setting("ocr_lang", lang_code)
 
-        ctk.CTkLabel(settings_win, text="Primary Language:").pack(pady=(5, 0))
-        lang_menu = ctk.CTkOptionMenu(settings_win, values=["Arabic & English (Auto)", "English Only"], command=change_lang)
+        ctk.CTkLabel(scroll_frame, text="Primary Language:").pack(pady=(5, 0))
+        lang_menu = ctk.CTkOptionMenu(scroll_frame, values=["Arabic & English (Auto)", "English Only"], command=change_lang)
         lang_menu.set(lang_var.get())
         lang_menu.pack(pady=5)
 
         # DPI Slider
-        ctk.CTkLabel(settings_win, text="OCR DPI Quality:").pack(pady=(5, 0))
+        ctk.CTkLabel(scroll_frame, text="OCR DPI Quality:").pack(pady=(5, 0))
         dpi_var = ctk.IntVar(value=get_setting("ocr_dpi", 300))
         
         def dpi_changed(val):
@@ -260,19 +276,214 @@ class DocumentProcessorApp(BaseApp):
             set_setting("ocr_dpi", snap)
             dpi_label.configure(text=f"{snap} DPI")
 
-        dpi_slider = ctk.CTkSlider(settings_win, from_=150, to=300, number_of_steps=2, command=dpi_changed)
+        dpi_slider = ctk.CTkSlider(scroll_frame, from_=150, to=300, number_of_steps=2, command=dpi_changed)
         dpi_slider.set(dpi_var.get())
         dpi_slider.pack(pady=5)
         
-        dpi_label = ctk.CTkLabel(settings_win, text=f"{dpi_var.get()} DPI")
+        dpi_label = ctk.CTkLabel(scroll_frame, text=f"{dpi_var.get()} DPI")
         dpi_label.pack(pady=(0, 5))
+
+        # ---- OCR Engine Section ----
+        separator_engine = ctk.CTkFrame(scroll_frame, height=2, fg_color="gray50")
+        separator_engine.pack(fill="x", padx=20, pady=(10, 5))
+        
+        # Pre-declare ai_var so engine change can auto-toggle it
+        ai_var = ctk.BooleanVar(value=get_setting("ai_correction", False))
+        
+        ctk.CTkLabel(scroll_frame, text="\U0001F50D OCR Engine", font=ctk.CTkFont(weight="bold", size=15)).pack(pady=(5, 2))
+        
+        # Engine Selection
+        engine_map = {
+            "Auto (Smart Routing)": "auto",
+            "PaddleOCR (Local)": "paddle",
+            "Gemini Vision (Cloud) ⚡ Fastest": "gemini_vision"
+        }
+        engine_reverse = {v: k for k, v in engine_map.items()}
+        current_engine = get_setting("ocr_engine", "auto")
+        
+        engine_desc_texts = {
+            "auto": "Local OCR first → falls back to Gemini if quality is low",
+            "paddle": "Offline only, no internet needed. Slower, lower Arabic accuracy",
+            "gemini_vision": "⚡ Fastest & most accurate. Sends images to Google Gemini API"
+        }
+        
+        engine_desc = ctk.CTkLabel(scroll_frame, text=engine_desc_texts.get(current_engine, ""),
+                                    font=ctk.CTkFont(size=11), text_color="gray60", wraplength=400)
+        engine_desc.pack(pady=(0, 3))
+        
+        def change_engine(choice):
+            engine_code = engine_map.get(choice, "auto")
+            set_setting("ocr_engine", engine_code)
+            engine_desc.configure(text=engine_desc_texts.get(engine_code, ""))
+            
+            # Auto-configure related settings
+            if engine_code == "gemini_vision":
+                # Gemini Vision produces high-quality text — AI correction is redundant
+                ai_var.set(False)
+                set_setting("ai_correction", False)
+                cloud_var.set(True)
+                set_setting("allow_cloud_ocr", True)
+            elif engine_code == "auto":
+                cloud_var.set(True)
+                set_setting("allow_cloud_ocr", True)
+        
+        ctk.CTkLabel(scroll_frame, text="OCR Engine:").pack(pady=(5, 0))
+        engine_menu = ctk.CTkOptionMenu(
+            scroll_frame,
+            values=list(engine_map.keys()),
+            command=change_engine
+        )
+        engine_menu.set(engine_reverse.get(current_engine, "Auto (Smart Routing)"))
+        engine_menu.pack(pady=5)
+        
+        # Cloud OCR Toggle
+        cloud_enabled = get_setting("allow_cloud_ocr", True)
+        cloud_var = ctk.BooleanVar(value=cloud_enabled)
+        
+        def toggle_cloud():
+            set_setting("allow_cloud_ocr", cloud_var.get())
+        
+        cloud_switch = ctk.CTkSwitch(scroll_frame, text="Allow Cloud OCR (sends images to Gemini)", variable=cloud_var, command=toggle_cloud)
+        cloud_switch.pack(pady=5)
+        
+        # Skip Tables Toggle
+        skip_tables = get_setting("skip_tables", False)
+        skip_var = ctk.BooleanVar(value=skip_tables)
+        
+        def toggle_skip_tables():
+            set_setting("skip_tables", skip_var.get())
+        
+        skip_switch = ctk.CTkSwitch(scroll_frame, text="Skip Tables (text-only mode)", variable=skip_var, command=toggle_skip_tables)
+        skip_switch.pack(pady=5)
+
+        # ---- Gemini API Keys Section ----
+        separator = ctk.CTkFrame(scroll_frame, height=2, fg_color="gray50")
+        separator.pack(fill="x", padx=20, pady=(10, 5))
+        
+        ctk.CTkLabel(scroll_frame, text="🔑 Gemini API Keys", font=ctk.CTkFont(weight="bold", size=15)).pack(pady=(5, 2))
+        ctk.CTkLabel(scroll_frame, text="Enter up to 5 keys (one per line). Auto-rotates when limit is reached.", 
+                     font=ctk.CTkFont(size=11), text_color="gray60", wraplength=400).pack(pady=(0, 5))
+        
+        # Multi-key text area
+        api_keys_textbox = ctk.CTkTextbox(scroll_frame, width=400, height=120, 
+                                           font=ctk.CTkFont(size=12, family="Consolas"))
+        existing_keys = get_setting("gemini_api_keys", [])
+        if not existing_keys:
+            # Backward compat: migrate single key
+            single_key = get_setting("gemini_api_key", "")
+            if single_key:
+                existing_keys = [single_key]
+        
+        api_keys_textbox.insert("1.0", "\n".join(k for k in existing_keys if k))
+        api_keys_textbox.pack(pady=5)
+        
+        key_status_label = ctk.CTkLabel(scroll_frame, text="", font=ctk.CTkFont(size=11))
+        key_status_label.pack(pady=(0, 3))
+        
+        def save_api_keys(event=None):
+            text = api_keys_textbox.get("1.0", "end").strip()
+            keys = [k.strip() for k in text.split("\n") if k.strip()]
+            # Pad to 5 slots
+            while len(keys) < 5:
+                keys.append("")
+            keys = keys[:5]  # Max 5
+            set_setting("gemini_api_keys", keys)
+            # Also set single key for backward compat
+            first_key = next((k for k in keys if k), "")
+            set_setting("gemini_api_key", first_key)
+            
+            valid_count = sum(1 for k in keys if k)
+            key_status_label.configure(
+                text=f"{valid_count} key(s) configured",
+                text_color="#51cf66" if valid_count > 0 else "#ff6b6b"
+            )
+            # Reset key manager exhaustion tracking when keys change
+            try:
+                from core.api_key_manager import APIKeyManager
+                APIKeyManager().reset_all()
+            except Exception:
+                pass
+        
+        api_keys_textbox.bind("<FocusOut>", save_api_keys)
+        
+        # Show initial count
+        valid_count = sum(1 for k in existing_keys if k)
+        key_status_label.configure(
+            text=f"{valid_count} key(s) configured",
+            text_color="#51cf66" if valid_count > 0 else "#ff6b6b"
+        )
+        
+        # Test All Keys Button
+        def test_all_keys():
+            save_api_keys()
+            keys = [k for k in get_setting("gemini_api_keys", []) if k.strip()]
+            if not keys:
+                test_status.configure(text="❌ No API keys entered", text_color="#ff6b6b")
+                return
+            
+            try:
+                from google import genai
+            except ImportError:
+                test_status.configure(text="❌ google-genai not installed", text_color="#ff6b6b")
+                return
+            
+            model_name = get_setting("gemini_model", "gemini-3.6-flash")
+            results = []
+            working = 0
+            
+            for i, key in enumerate(keys):
+                try:
+                    client = genai.Client(api_key=key)
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents="Reply with only: OK"
+                    )
+                    if response and response.text:
+                        results.append(f"Key {i+1}: ✅")
+                        working += 1
+                    else:
+                        results.append(f"Key {i+1}: ⚠️ Empty response")
+                except Exception as e:
+                    err = str(e)[:40]
+                    if "429" in str(e) or "quota" in str(e).lower():
+                        results.append(f"Key {i+1}: ⚠️ Rate limited")
+                    else:
+                        results.append(f"Key {i+1}: ❌ {err}")
+            
+            summary = " | ".join(results)
+            color = "#51cf66" if working == len(keys) else "#ffa94d" if working > 0 else "#ff6b6b"
+            test_status.configure(text=f"{working}/{len(keys)} working — {summary}", text_color=color)
+        
+        test_btn = ctk.CTkButton(scroll_frame, text="Test All Keys", command=test_all_keys,
+                                 width=150, fg_color="#2b8a3e", hover_color="#237032")
+        test_btn.pack(pady=5)
+        
+        test_status = ctk.CTkLabel(scroll_frame, text="", font=ctk.CTkFont(size=11), wraplength=420)
+        test_status.pack(pady=(0, 5))
+        
+        # ---- AI Correction Toggle ----
+        ctk.CTkLabel(scroll_frame, text="🧠 AI Text Correction", font=ctk.CTkFont(weight="bold", size=13)).pack(pady=(10, 2))
+        ctk.CTkLabel(scroll_frame, text="Extra Gemini pass to fix OCR errors (only for PaddleOCR)", 
+                     font=ctk.CTkFont(size=11), text_color="gray60").pack(pady=(0, 3))
+        
+        # AI Toggle (ai_var declared above in engine section)
+        ai_enabled = ai_var.get()
+        
+        def toggle_ai():
+            set_setting("ai_correction", ai_var.get())
+            
+        ai_switch = ctk.CTkSwitch(scroll_frame, text="Enable AI Correction", variable=ai_var, command=toggle_ai)
+        ai_switch.pack(pady=5)
+        
+        separator2 = ctk.CTkFrame(scroll_frame, height=2, fg_color="gray50")
+        separator2.pack(fill="x", padx=20, pady=(5, 10))
 
         # Appearance Mode
         def change_appearance_mode(new_appearance_mode: str):
             ctk.set_appearance_mode(new_appearance_mode)
         
-        ctk.CTkLabel(settings_win, text="Appearance Mode:").pack(pady=(5, 0))
-        appearance_menu = ctk.CTkOptionMenu(settings_win, values=["System", "Light", "Dark"], command=change_appearance_mode)
+        ctk.CTkLabel(scroll_frame, text="Appearance Mode:").pack(pady=(5, 0))
+        appearance_menu = ctk.CTkOptionMenu(scroll_frame, values=["System", "Light", "Dark"], command=change_appearance_mode)
         appearance_menu.set(ctk.get_appearance_mode())
         appearance_menu.pack(pady=5)
 
@@ -288,7 +499,7 @@ class DocumentProcessorApp(BaseApp):
             else:
                 self.update_status("Cache is already empty.")
 
-        clear_cache_btn = ctk.CTkButton(settings_win, text="Clear Cache", command=clear_cache, fg_color="#ab3a3a", hover_color="#802b2b")
+        clear_cache_btn = ctk.CTkButton(scroll_frame, text="Clear Cache", command=clear_cache, fg_color="#ab3a3a", hover_color="#802b2b")
         clear_cache_btn.pack(pady=10)
 
     def browse_file(self) -> None:
@@ -370,14 +581,21 @@ class DocumentProcessorApp(BaseApp):
     def _get_file_hash(self, filepath: str, pages_str: str) -> str:
         # Pipeline version: bump this when preprocessing or engine params change
         # to automatically invalidate old cached results
-        PIPELINE_VERSION = "v5"
+        PIPELINE_VERSION = "v9"
         hasher = hashlib.md5()
         with open(filepath, 'rb') as f:
             buf = f.read(65536)
             while len(buf) > 0:
                 hasher.update(buf)
                 buf = f.read(65536)
-        settings_str = f"{PIPELINE_VERSION}_{pages_str}_{get_setting('ocr_lang', 'ar')}_{get_setting('use_gpu', False)}_{get_setting('ocr_dpi', 300)}"
+        settings_str = (
+            f"{PIPELINE_VERSION}_{pages_str}"
+            f"_{get_setting('ocr_engine', 'auto')}"
+            f"_{get_setting('ocr_lang', 'ar')}"
+            f"_{get_setting('use_gpu', False)}"
+            f"_{get_setting('ocr_dpi', 300)}"
+            f"_{get_setting('skip_tables', False)}"
+        )
         hasher.update(settings_str.encode('utf-8'))
         return hasher.hexdigest()
 
@@ -393,14 +611,79 @@ class DocumentProcessorApp(BaseApp):
             cache_file = cache_dir / f"{file_hash}.json"
 
             full_extracted_text = ""
+            rate_limit_hit = False
+            rate_limit_reset = ""
 
             if cache_file.exists():
-                self.after(0, self.update_status, "Cache hit! Loading previous results...")
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    cached_data = json.load(f)
-                    full_extracted_text = cached_data.get("raw_text", "")
-                self.after(0, self.progress_bar.set, 1.0)
-            else:
+                # Ask the user whether to use cached result or reprocess
+                use_cache_event = threading.Event()
+                use_cache_result = [True]  # default: use cache
+
+                def ask_cache_choice():
+                    dialog = ctk.CTkToplevel(self)
+                    dialog.title("Cached Result Found")
+                    dialog.geometry("420x200")
+                    dialog.attributes("-topmost", True)
+                    dialog.grab_set()
+                    dialog.resizable(False, False)
+
+                    ctk.CTkLabel(
+                        dialog,
+                        text="📋 This file was already processed.",
+                        font=ctk.CTkFont(size=15, weight="bold")
+                    ).pack(pady=(20, 5))
+                    ctk.CTkLabel(
+                        dialog,
+                        text="Do you want to use the cached result or reprocess the file?",
+                        font=ctk.CTkFont(size=12),
+                        text_color="gray70",
+                        wraplength=380
+                    ).pack(pady=(0, 15))
+
+                    btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+                    btn_frame.pack()
+
+                    def use_cached():
+                        use_cache_result[0] = True
+                        dialog.destroy()
+                        use_cache_event.set()
+
+                    def reprocess():
+                        use_cache_result[0] = False
+                        dialog.destroy()
+                        use_cache_event.set()
+
+                    ctk.CTkButton(
+                        btn_frame, text="✅ Use Cached Result",
+                        command=use_cached, width=170,
+                        fg_color="#2b8a3e", hover_color="#237032"
+                    ).pack(side="left", padx=8)
+
+                    ctk.CTkButton(
+                        btn_frame, text="🔄 Reprocess",
+                        command=reprocess, width=170,
+                        fg_color="#1971c2", hover_color="#1864ab"
+                    ).pack(side="left", padx=8)
+
+                    dialog.protocol("WM_DELETE_WINDOW", use_cached)  # X button = use cache
+
+                self.after(0, ask_cache_choice)
+                use_cache_event.wait()  # Block background thread until user responds
+
+                if use_cache_result[0]:
+                    # Load from cache
+                    self.after(0, self.update_status, "Loading cached result...")
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        cached_data = json.load(f)
+                        full_extracted_text = cached_data.get("raw_text", "")
+                    self.after(0, self.progress_bar.set, 1.0)
+                else:
+                    # Delete old cache so pipeline overwrites it at the end
+                    cache_file.unlink(missing_ok=True)
+                    self.after(0, self.update_status, "Reprocessing file...")
+
+            if not full_extracted_text:
+                # Either no cache existed, or user chose to reprocess (cache was deleted above)
                 self.after(0, self.update_status, "Converting document to images...")
                 image_paths = convert_to_images(
                     file_path=self.selected_file_path,
@@ -409,33 +692,95 @@ class DocumentProcessorApp(BaseApp):
                 )
                 
                 total_pages = len(image_paths)
-                self.after(0, self.update_status, f"Extracting text from {total_pages} pages using multiprocessing...")
+                engine_mode = get_setting('ocr_engine', 'auto')
+                self.after(0, self.update_status, f"Extracting text from {total_pages} pages (engine: {engine_mode})...")
                 
+                # Track whether any page used Gemini Vision (to skip AI correction)
+                used_gemini_vision = False
                 results_dict = {}
-                with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as executor:
-                    future_to_index = {executor.submit(extract_text_from_image, img_path): i for i, img_path in enumerate(image_paths)}
+                
+                # Use the new OCR router for each page
+                from core.ocr_router import extract_text as router_extract_text
+                
+                def process_single_page(img_path):
+                    """Process a single page through the OCR router."""
+                    result = router_extract_text(img_path)
+                    return result
+                
+                # For Gemini Vision, use single thread to respect rate limits
+                if engine_mode == 'gemini_vision':
+                    max_w = 1
+                else:
+                    max_w = min(4, os.cpu_count() or 1)
+                    
+                # Track rate limit info
+                rate_limit_hit = False
+                rate_limit_reset = ""
+                
+                with ThreadPoolExecutor(max_workers=max_w) as executor:
+                    future_to_index = {
+                        executor.submit(process_single_page, img_path): i 
+                        for i, img_path in enumerate(image_paths)
+                    }
                     completed = 0
                     for future in concurrent.futures.as_completed(future_to_index):
                         idx = future_to_index[future]
                         try:
                             ocr_result = future.result()
-                            results_dict[idx] = ocr_result["raw_text"]
+                            results_dict[idx] = ocr_result.raw_text
+                            if ocr_result.engine == 'gemini_vision':
+                                used_gemini_vision = True
+                            # Check if this page needs AI correction
+                            if ocr_result.metadata.get('needs_ai_correction'):
+                                results_dict[f"{idx}_needs_ai"] = True
+                            # Track rate limit
+                            if ocr_result.metadata.get('rate_limit'):
+                                rate_limit_hit = True
+                                rate_limit_reset = ocr_result.metadata.get('rate_limit_reset', '')
                         except Exception as exc:
                             results_dict[idx] = f"[Error extracting text from page {idx+1}: {exc}]"
                         
                         completed += 1
                         progress = completed / total_pages
                         self.after(0, self.progress_bar.set, progress)
-                        self.after(0, self.update_status, f"Extracted text from {completed}/{total_pages} pages...")
+                        status_msg = f"Extracted text from {completed}/{total_pages} pages..."
+                        if rate_limit_hit:
+                            reset_info = f" (API limit reached{', resets in ' + rate_limit_reset if rate_limit_reset else ''})"
+                            status_msg += reset_info
+                        self.after(0, self.update_status, status_msg)
                         
                 for i in range(total_pages):
                     full_extracted_text += results_dict.get(i, "") + "\n\n"
+                
+                full_extracted_text = full_extracted_text.strip()
+                
+                # ---- AI Correction Pass ----
+                # Only apply AI correction for PaddleOCR results, NOT for Gemini Vision
+                # (Gemini Vision already produces high-quality text; double-correcting causes hallucinations)
+                needs_ai = not used_gemini_vision and is_ai_correction_available()
+                if needs_ai:
+                    self.after(0, self.update_status, "Applying AI text correction (Gemini)...")
+                    self.after(0, self.progress_bar.set, 0.0)
+                    
+                    def ai_progress(msg):
+                        self.after(0, self.update_status, msg)
+                    
+                    corrected_text = correct_text_with_ai(full_extracted_text, progress_callback=ai_progress)
+                    if corrected_text:
+                        full_extracted_text = corrected_text
+                    self.after(0, self.progress_bar.set, 1.0)
+                elif used_gemini_vision:
+                    self.after(0, self.update_status, "Gemini Vision used — skipping AI correction (already high quality).")
                     
                 with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump({"raw_text": full_extracted_text.strip()}, f, ensure_ascii=False, indent=4)
+                    json.dump({"raw_text": full_extracted_text}, f, ensure_ascii=False, indent=4)
 
             self.after(0, self.show_results_window, full_extracted_text)
-            self.after(0, self.update_status, "Processing complete.")
+            if rate_limit_hit:
+                reset_info = f" Resets in {rate_limit_reset}." if rate_limit_reset else ""
+                self.after(0, self.update_status, f"Processing complete. ⚠️ API limit was reached.{reset_info}")
+            else:
+                self.after(0, self.update_status, "Processing complete.")
 
         except Exception as e:
             error_msg = f"An error occurred:\n{str(e)}"
@@ -480,9 +825,60 @@ class DocumentProcessorApp(BaseApp):
         calc_btn.pack()
 
         ctk.CTkLabel(result_window, text="Extracted Text:", font=ctk.CTkFont(weight="bold")).pack(pady=(10, 5))
+        
+        # Check if text has Arabic content
+        has_arabic = any('\u0600' <= c <= '\u06FF' for c in text_data)
+        
+        # RTL display toggle for Arabic text
+        if has_arabic:
+            rtl_frame = ctk.CTkFrame(result_window, fg_color="transparent")
+            rtl_frame.pack(pady=(0, 5))
+            
+            rtl_var = ctk.BooleanVar(value=True)
+            
+            def make_rtl_text(text):
+                """Reverse word order of Arabic lines so LTR widget displays them correctly."""
+                lines = text.split('\n')
+                fixed = []
+                for line in lines:
+                    line_has_ar = any('\u0600' <= c <= '\u06FF' for c in line)
+                    if line_has_ar and line.strip():
+                        # Reverse word order for display in LTR widget
+                        words = line.split()
+                        fixed.append(' '.join(reversed(words)))
+                    else:
+                        fixed.append(line)
+                return '\n'.join(fixed)
+            
+            def toggle_rtl():
+                inner = text_box._textbox
+                inner.delete("1.0", "end")
+                if rtl_var.get():
+                    display = make_rtl_text(text_data)
+                    inner.tag_configure("rtl", justify="right")
+                    inner.insert("1.0", display)
+                    inner.tag_add("rtl", "1.0", "end")
+                else:
+                    inner.insert("1.0", text_data)
+            
+            rtl_switch = ctk.CTkSwitch(rtl_frame, text="Fix Arabic Display (RTL)", 
+                                        variable=rtl_var, command=toggle_rtl)
+            rtl_switch.pack(side="left", padx=10)
+            
+            ctk.CTkLabel(rtl_frame, text="Toggle if Arabic text appears reversed",
+                        font=ctk.CTkFont(size=11), text_color="gray60").pack(side="left")
+        
         text_box = ctk.CTkTextbox(result_window, width=700, height=400)
         text_box.pack(pady=5)
-        text_box.insert("0.0", text_data)
+        
+        if has_arabic:
+            # Default: show RTL-fixed display
+            inner_text = text_box._textbox
+            inner_text.tag_configure("rtl", justify="right")
+            inner_text.insert("1.0", make_rtl_text(text_data))
+            inner_text.tag_add("rtl", "1.0", "end")
+        else:
+            text_box.insert("0.0", text_data)
         
         export_frame = ctk.CTkFrame(result_window, fg_color="transparent")
         export_frame.pack(pady=(10, 10))
@@ -503,7 +899,11 @@ class DocumentProcessorApp(BaseApp):
             save_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text File", "*.txt")], title="Save Extracted Text as TXT")
             if save_path:
                 try:
-                    with open(save_path, "w", encoding="utf-8") as f:
+                    with open(save_path, "w", encoding="utf-8-sig") as f:
+                        # Add RTL mark for Arabic content
+                        has_ar = any('\u0600' <= c <= '\u06FF' for c in text_data)
+                        if has_ar:
+                            f.write('\u200F')  # Right-to-Left Mark
                         f.write(text_data)
                     self.update_status(f"Successfully saved to {Path(save_path).name}")
                 except Exception as e:

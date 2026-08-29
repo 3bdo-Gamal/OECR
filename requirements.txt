@@ -7,3 +7,4 @@ PyPDF2
 python-dotenv
 pyinstaller
 tkinterdnd2
+google-genai

@@ -1,0 +1,8 @@
+{
+    "engine": "gemini_vision",
+    "confidence": 0.95,
+    "quality_score": 0.9799999999999999,
+    "line_count": 12,
+    "char_count": 787,
+    "needs_fallback": false
+}

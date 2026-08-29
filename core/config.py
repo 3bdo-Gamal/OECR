@@ -1,8 +1,26 @@
 import json
+import sys
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-SETTINGS_FILE = Path(__file__).parent.parent / "settings.json"
+
+def get_app_dir() -> Path:
+    """Get the application base directory. Works in dev and PyInstaller frozen mode."""
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller exe — settings go next to the exe
+        return Path(sys.executable).parent
+    return Path(__file__).parent.parent
+
+
+def get_bundle_dir() -> Path:
+    """Get the bundle data directory (where PyInstaller extracts data files)."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).parent.parent
+
+
+SETTINGS_FILE = get_app_dir() / "settings.json"
 
 def load_settings() -> Dict[str, Any]:
     """

@@ -1,0 +1,8 @@
+{
+    "engine": "paddle",
+    "confidence": 0.9130499935386205,
+    "quality_score": 0.8652199974154482,
+    "line_count": 101,
+    "char_count": 602,
+    "needs_fallback": false
+}
